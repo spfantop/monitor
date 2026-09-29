@@ -13,9 +13,9 @@
 
 | 仓库 | 说明 |
 |---|---|
-| [monitor](https://github.com/monitor-probe/monitor) | hub：后台、API、公开页宿主 |
-| [agent](https://github.com/monitor-probe/agent) | Linux agent |
-| [monitor-theme-default](https://github.com/monitor-probe/monitor-theme-default) | 内置默认主题 |
+| [monitor](https://github.com/spfantop/monitor) | hub：后台、API、公开页宿主 |
+| [agent](https://github.com/spfantop/agent) | Linux agent |
+| [monitor-theme-default](https://github.com/spfantop/monitor-theme-default) | 内置默认主题 |
 
 ```
 agent (Linux)  ──WebSocket / JSON-RPC 2.0──▶  hub (axum + SQLite)  ──▶  后台 + 状态页

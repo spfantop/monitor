@@ -2970,7 +2970,7 @@ function Data() {
   )
 }
 
-const releaseUrl = (repo: string, version: string) => `https://github.com/monitor-probe/${repo}/releases/tag/v${version}`
+const releaseUrl = (repo: string, version: string) => `https://github.com/spfantop/${repo}/releases/tag/v${version}`
 
 /** `v1.2.0 → v1.3.0` when something is published, the running version alone otherwise. */
 function VersionPair({ current, latest }: { current: string; latest: string }) {
