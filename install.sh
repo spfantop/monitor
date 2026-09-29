@@ -226,6 +226,22 @@ add_user() {
 	fi
 }
 
+make_dir() {
+	if command -v install >/dev/null; then
+		install -d -m "$1" "$2"
+	else
+		mkdir -p "$2" && chmod "$1" "$2"
+	fi
+}
+
+copy_mode() {
+	if command -v install >/dev/null; then
+		install -m "$1" "$2" "$3"
+	else
+		cp "$2" "$3" && chmod "$1" "$3"
+	fi
+}
+
 # The service user the agent runs as under either init system, created before
 # the download and the registration, so a host where this fails keeps the agent
 # it already runs and spends no registration key. One case passes this check
@@ -353,12 +369,12 @@ else
 		exit 1
 	}
 fi
-install -d -m 0755 "$ROOT"
+make_dir 0755 "$ROOT"
 # Kept until the new binary has proved it starts; see not_started. Never over
 # an existing copy: a run that died before that check left an unproven binary
 # in $BIN, and the copy is the one that ran before it.
 [ ! -f "$BIN" ] || [ -f "$BIN.old" ] || cp "$BIN" "$BIN.old"
-install -m 0755 "$TMP" "$BIN"
+copy_mode 0755 "$TMP" "$BIN"
 
 # The token lives in a root-only environment file rather than the unit, keeping
 # it out of `systemctl cat` and the world-readable journal. 0600 root is what
