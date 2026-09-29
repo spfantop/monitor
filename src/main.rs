@@ -281,7 +281,7 @@ impl<S: futures_core::Stream + Unpin> futures_core::Stream for Metered<S> {
 /// that too. Deliberately deferred, as it couples agent releases to hub
 /// releases.
 async fn agent_binary(State(app): State<Shared>, Path(arch): Path<String>) -> Response {
-    if !matches!(arch.as_str(), "x86_64" | "aarch64") {
+    if !matches!(arch.as_str(), "x86_64" | "aarch64" | "mipsel") {
         return api::answer(StatusCode::NOT_FOUND, "unknown architecture");
     }
     let Ok(Ok(permit)) = tokio::time::timeout(RELAY_WAIT, RELAY_GATE.acquire()).await else {

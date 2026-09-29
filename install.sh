@@ -228,6 +228,14 @@ id -u monitor-agent >/dev/null 2>&1 || add_user ||
 case "$(uname -m)" in
 x86_64 | amd64) ARCH=x86_64 ;;
 aarch64 | arm64) ARCH=aarch64 ;;
+mips)
+	# OpenWrt reports mips for both endian variants; only the little-endian
+	# mipsel_24kc release is currently published.
+	case "$(sed -n "s/^DISTRIB_ARCH='\\([^']*\\)'.*/\\1/p" /etc/openwrt_release 2>/dev/null)" in
+	mipsel*) ARCH=mipsel ;;
+	*) echo "unsupported MIPS architecture: check /etc/openwrt_release" >&2; exit 1 ;;
+	esac
+	;;
 *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
