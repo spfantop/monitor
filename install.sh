@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs monitor-agent as a systemd or OpenRC service.
+# Installs monitor-agent as a systemd, OpenRC, or OpenWrt procd service.
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --token TOKEN [options]
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --register KEY [options]
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --upgrade
@@ -203,8 +203,10 @@ if command -v systemctl >/dev/null; then
 	INIT=systemd
 elif command -v rc-update >/dev/null; then
 	INIT=openrc
+elif [ -f /lib/functions/procd.sh ] && [ -x /etc/rc.common ]; then
+	INIT=procd
 else
-	echo "this installer needs systemd or OpenRC" >&2
+	echo "this installer needs systemd, OpenRC, or OpenWrt procd" >&2
 	exit 1
 fi
 
@@ -330,6 +332,8 @@ fi
 # node that cannot fetch the binary keeps running.
 if [ "$INIT" = openrc ]; then
 	rc-service monitor-agent stop 2>/dev/null || true
+elif [ "$INIT" = procd ]; then
+	/etc/init.d/monitor-agent stop 2>/dev/null || true
 else
 	systemctl stop monitor-agent 2>/dev/null || true
 	# An agent installed before the fixed user ran under DynamicUser=, and while
@@ -374,6 +378,8 @@ not_started() {
 	mv -f "$BIN.old" "$BIN"
 	if [ "$INIT" = openrc ]; then
 		rc-service monitor-agent restart >/dev/null 2>&1 || true
+	elif [ "$INIT" = procd ]; then
+		/etc/init.d/monitor-agent restart >/dev/null 2>&1 || true
 	else
 		systemctl restart monitor-agent || true
 	fi
@@ -419,6 +425,32 @@ RC
 	pidof monitor-agent >/dev/null || not_started "$LOG_FILE"
 	rm -f "$BIN.old"
 	echo "monitor-agent installed; follow it with: tail -f $LOG_FILE"
+	exit 0
+fi
+
+if [ "$INIT" = procd ]; then
+	cat >"$RC_FILE" <<RC
+#!/bin/sh /etc/rc.common
+START=99
+USE_PROCD=1
+
+start_service() {
+	. "$ENV_FILE"
+	procd_open_instance
+	procd_set_param command "$BIN" --interval "$INTERVAL"${INSECURE:+ --insecure}
+	procd_set_param env MONITOR_SERVER="$MONITOR_SERVER" MONITOR_TOKEN="$MONITOR_TOKEN"
+	[ -z "${MONITOR_IFACE:-}" ] || procd_set_param env MONITOR_IFACE="$MONITOR_IFACE"
+	procd_set_param respawn
+	procd_close_instance
+}
+RC
+	chmod 0755 "$RC_FILE"
+	"$RC_FILE" enable
+	"$RC_FILE" restart
+	sleep 3
+	pidof monitor-agent >/dev/null || not_started "logread | grep monitor-agent"
+	rm -f "$BIN.old"
+	echo "monitor-agent installed; follow it with: logread -f | grep monitor-agent"
 	exit 0
 fi
 
