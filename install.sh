@@ -215,8 +215,14 @@ fi
 add_user() {
 	if command -v useradd >/dev/null; then
 		useradd --system --no-create-home --shell /usr/sbin/nologin monitor-agent
-	else
+	elif command -v adduser >/dev/null; then
 		adduser -S -D -H -s /sbin/nologin monitor-agent
+	elif [ "$INIT" = procd ]; then
+		# Minimal OpenWrt images may omit both user management commands. The
+		# procd unit has no command_user, so it can still run the agent as root.
+		return 0
+	else
+		return 1
 	fi
 }
 
