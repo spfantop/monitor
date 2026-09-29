@@ -211,8 +211,12 @@ install_hub() {
 	# contains no tag -- so this must not follow redirects. A missing asset still
 	# redirects, so the download below is what catches an architecture that was
 	# never published.
-	tag="$(curl -fsSI -o /dev/null -w '%{redirect_url}' "$base/$asset" 2>/dev/null |
-		sed -n 's#.*/download/\([^/]*\)/.*#\1#p')" || true
+	# Parse the Location header directly instead of using curl's
+	# `%{redirect_url}` write-out variable, which is unavailable in the curl
+	# 7.29 shipped by some enterprise distributions.
+	tag="$(curl -fsSI "$base/$asset" 2>/dev/null |
+		sed -n 's#^[Ll]ocation:[[:space:]]*.*/download/\([^/]*\)/.*#\1#p' |
+		tail -n 1)" || true
 	[ -n "$tag" ] || die "查不到最新发布版；GitHub 不可达，或还没有任何发布"
 	ok "版本" "$tag"
 
