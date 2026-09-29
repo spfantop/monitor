@@ -460,8 +460,8 @@ start_service() {
 	. "$ENV_FILE"
 	procd_open_instance
 	procd_set_param command "$BIN" --interval "$INTERVAL"${INSECURE:+ --insecure}
-	procd_set_param env MONITOR_SERVER="$MONITOR_SERVER" MONITOR_TOKEN="$MONITOR_TOKEN"
-	[ -z "${MONITOR_IFACE:-}" ] || procd_set_param env MONITOR_IFACE="$MONITOR_IFACE"
+	procd_set_param env MONITOR_SERVER="\$MONITOR_SERVER" MONITOR_TOKEN="\$MONITOR_TOKEN"
+	[ -z "\${MONITOR_IFACE:-}" ] || procd_set_param env MONITOR_IFACE="\$MONITOR_IFACE"
 	procd_set_param respawn
 	procd_close_instance
 }
