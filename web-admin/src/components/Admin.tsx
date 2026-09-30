@@ -2718,7 +2718,107 @@ function Sessions({ rows, reload }: { rows: Session[]; reload: () => void }) {
   )
 }
 
-function Security({ site }: { site: string }) {
+type ApiToken = {
+  id: number
+  name: string
+  expires_at: number | null
+  created_at: number
+  last_used_at: number | null
+  revoked_at: number | null
+  node_ids: number[]
+  all_nodes: boolean
+}
+
+function ApiTokens({ nodes }: { nodes: Node[] }) {
+  const [tokens, setTokens] = useState<ApiToken[] | null>(null)
+  const [name, setName] = useState("")
+  const [expires, setExpires] = useState("")
+  const [chosen, setChosen] = useState<Set<number>>(new Set())
+  const [allNodes, setAllNodes] = useState(true)
+  const [created, setCreated] = useState<string | null>(null)
+  const [editing, setEditing] = useState<ApiToken | null>(null)
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(() => api<{ tokens: ApiToken[] }>("/api-tokens").then((r) => setTokens(r.tokens)).catch((e: Error) => toast.error(e.message)), [])
+  useEffect(() => { load() }, [load])
+  async function create() {
+    if (!name.trim()) return toast.error("请输入 Token 名称")
+    setBusy(true)
+    try {
+      const path = editing ? `/api-tokens/${editing.id}` : "/api-tokens"
+      const result = await api<{ token?: string }>(path, {
+        method: editing ? "PUT" : "POST",
+        body: JSON.stringify({
+          name: name.trim(),
+          expires_at: expires ? Math.floor(new Date(expires).getTime() / 1000) : null,
+          node_ids: allNodes ? null : [...chosen],
+        }),
+      })
+      if (editing) toast.success("Token 设置已更新")
+      else setCreated(result.token ?? null)
+      setEditing(null)
+      setName("")
+      setExpires("")
+      setChosen(new Set())
+      load()
+    } catch (e) { toast.error((e as Error).message) } finally { setBusy(false) }
+  }
+  async function revoke(id: number) {
+    try { await api(`/api-tokens/${id}`, { method: "DELETE" }); toast.success("Token 已撤销"); load() }
+    catch (e) { toast.error((e as Error).message) }
+  }
+  function pick(list: Node[], on: boolean) {
+    setChosen((current) => {
+      const next = new Set(current)
+      list.forEach((node) => on ? next.add(node.id) : next.delete(node.id))
+      return next
+    })
+  }
+  return (
+    <Card className="gap-4 p-5">
+      <div>
+        <h3 className="text-sm font-medium">只读 API Token</h3>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">给外部平台读取服务器概览和指标。Token 只显示一次，请使用 Authorization: Bearer 传递。</p>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="名称"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：监控大屏" /></Field>
+        <Field label="过期时间" hint="留空表示不过期"><Input type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)} /></Field>
+      </div>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={allNodes} onChange={(e) => setAllNodes(e.target.checked)} />允许读取全部服务器</label>
+      {!allNodes && <NodePicker nodes={nodes} chosen={chosen} onPick={pick} />}
+      <div className="flex gap-2">
+        <Button size="sm" className="w-fit" disabled={busy} onClick={create}>{editing ? "保存 Token 设置" : "创建 Token"}</Button>
+        {editing && <Button size="sm" variant="ghost" onClick={() => { setEditing(null); setName(""); setExpires(""); setChosen(new Set()); setAllNodes(true) }}>取消编辑</Button>}
+      </div>
+      {created && (
+        <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+          <p className="text-xs font-medium">Token 只显示这一次，请立即复制保存。</p>
+          <Command>{created}</Command>
+          <Button size="sm" variant="secondary" onClick={() => copy(created, "Token 已复制")}>复制 Token</Button>
+        </div>
+      )}
+      {tokens && (
+        <div className="divide-y border-t">
+          {tokens.map((token) => (
+            <div key={token.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
+              <div className="min-w-0"><div className="font-medium">{token.name}</div><div className="text-xs text-muted-foreground">{token.revoked_at ? "已撤销" : token.all_nodes ? "全部服务器" : `${token.node_ids.length} 台服务器`} · 创建于 {new Date(token.created_at * 1000).toLocaleString("zh-CN")}</div></div>
+              {!token.revoked_at && <div className="flex gap-1"><Button size="sm" variant="ghost" onClick={() => {
+                setEditing(token)
+                setName(token.name)
+                setExpires(token.expires_at ? new Date(token.expires_at * 1000).toISOString().slice(0, 16) : "")
+                setAllNodes(token.all_nodes)
+                setChosen(new Set(token.node_ids))
+                setCreated(null)
+              }}>编辑</Button><Button size="sm" variant="ghost" onClick={() => revoke(token.id)}>撤销</Button></div>}
+            </div>
+          ))}
+          {!tokens.length && <p className="py-3 text-xs text-muted-foreground">还没有 API Token</p>}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function Security({ site, nodes }: { site: string; nodes: Node[] }) {
   const { s, set, save } = useSettings()
   const sessions = useSessions()
   const [password, setPassword] = useState("")
@@ -2730,6 +2830,7 @@ function Security({ site }: { site: string }) {
   return (
     <div className="space-y-4">
       <Sessions rows={sessions.rows} reload={sessions.load} />
+      <ApiTokens nodes={nodes} />
 
       <Card className="gap-4 p-5">
         <div>
@@ -3212,7 +3313,7 @@ export function Admin({
         ) : path === "/admin/themes" ? (
           <Themes />
         ) : path === "/admin/security" ? (
-          <Security site={site} />
+          <Security site={site} nodes={nodes} />
         ) : path === "/admin/settings" ? (
           <SettingsTab onSaved={reloadMe} />
         ) : path === "/admin/update" ? (

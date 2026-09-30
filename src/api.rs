@@ -1,6 +1,8 @@
 //! The panel and public-status HTTP surface.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{Arc, LazyLock};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
@@ -35,6 +37,44 @@ impl FromRequestParts<Shared> for Admin {
             Err(answer(StatusCode::UNAUTHORIZED, "登录已失效，请重新登录"))
         }
     }
+}
+
+/// Read-only access granted by an API token. An empty node scope means all nodes.
+pub struct ApiAccess {
+    pub node_ids: Option<HashSet<i64>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+static API_REQUESTS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(32)));
+
+impl FromRequestParts<Shared> for ApiAccess {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, app: &Shared) -> Result<Self, Self::Rejection> {
+        let Some(value) = parts.headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+            warn!("API request missing authorization token");
+            return Err(answer(StatusCode::UNAUTHORIZED, "缺少 API Token"));
+        };
+        let Some(token) = value.strip_prefix("Bearer ").filter(|v| !v.is_empty()) else {
+            warn!("API request has malformed authorization token");
+            return Err(answer(StatusCode::UNAUTHORIZED, "API Token 格式不正确"));
+        };
+        let permit = API_REQUESTS.clone().try_acquire_owned().map_err(|_| {
+            warn!("API request concurrency limit reached");
+            answer(StatusCode::TOO_MANY_REQUESTS, "API 请求过多，请稍后再试")
+        })?;
+        let scope = app.db.use_api_token(&token_hash(token)).ok().flatten();
+        let Some((_, node_ids)) = scope else {
+            warn!("API request has an invalid, expired, or revoked token");
+            return Err(answer(StatusCode::UNAUTHORIZED, "API Token 无效或已过期"));
+        };
+        Ok(Self { node_ids: node_ids.map(|ids| ids.into_iter().collect()), _permit: permit })
+    }
+}
+
+fn token_hash(token: &str) -> String {
+    crate::auth::sha256(token)
 }
 
 /// Marks a response whose text was written for the reader; see [`plain_errors`].
@@ -318,6 +358,69 @@ pub async fn nodes(State(app): State<Shared>, headers: HeaderMap) -> Response {
     // connection the agents write through.
     ([(axum::http::header::CONTENT_TYPE, "application/json")], live_snapshot(&app, full).as_str().to_owned())
         .into_response()
+}
+
+fn api_view(app: &Shared, ids: &Option<HashSet<i64>>) -> Result<Vec<Value>, anyhow::Error> {
+    let nodes = app.db.nodes()?;
+    let traffic = app.db.all_traffic();
+    let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
+    let none = Traffic::default();
+    let today = Local::now().date_naive();
+    nodes
+        .iter()
+        .filter(|n| ids.as_ref().is_none_or(|allowed| allowed.contains(&n.id)))
+        .map(|n| {
+            let mut view = node_view(n, agents.get(&n.id), traffic.get(&n.id).unwrap_or(&none), true, today);
+            if let Some(object) = view.as_object_mut() {
+                object.remove("token");
+                object.remove("remark");
+                object.remove("notify");
+            }
+            Ok(view)
+        })
+        .collect()
+}
+
+pub async fn api_servers(ApiAccess { node_ids, .. }: ApiAccess, State(app): State<Shared>) -> Response {
+    match api_view(&app, &node_ids) {
+        Ok(nodes) => Json(json!({"servers": nodes})).into_response(),
+        Err(e) => fail(e),
+    }
+}
+
+pub async fn api_server(
+    ApiAccess { node_ids, .. }: ApiAccess,
+    State(app): State<Shared>,
+    Path(id): Path<i64>,
+) -> Response {
+    if node_ids.as_ref().is_some_and(|ids| !ids.contains(&id)) {
+        return no_such_node();
+    }
+    match api_view(&app, &None)
+        .and_then(|nodes| nodes.into_iter().find(|n| n["id"] == id).ok_or_else(|| anyhow::anyhow!("missing")))
+    {
+        Ok(node) => Json(node).into_response(),
+        Err(_) => no_such_node(),
+    }
+}
+
+pub async fn api_server_metrics(
+    ApiAccess { node_ids, .. }: ApiAccess,
+    State(app): State<Shared>,
+    Path(id): Path<i64>,
+    Query(w): Query<Window>,
+) -> Response {
+    if node_ids.as_ref().is_some_and(|ids| !ids.contains(&id)) || app.db.node(id).ok().flatten().is_none() {
+        return no_such_node();
+    }
+    let hours = w.hours.clamp(1, ADMIN_HOURS);
+    let since = Utc::now().timestamp() - hours * 3_600;
+    let step = sample_step(hours, w.points);
+    match tokio::task::spawn_blocking(move || app.db.metrics(id, since, step)).await {
+        Ok(Ok(metrics)) => Json(json!({"metrics": metrics})).into_response(),
+        Ok(Err(e)) => fail(e),
+        Err(e) => fail(anyhow::anyhow!(e)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1865,6 +1968,83 @@ pub async fn sessions(_: Admin, State(app): State<Shared>, headers: HeaderMap) -
     }
 }
 
+#[derive(Deserialize)]
+pub struct ApiTokenInput {
+    pub name: String,
+    pub expires_at: Option<i64>,
+    /// `null` means every node; an array restricts the token to those ids.
+    pub node_ids: Option<Vec<i64>>,
+}
+
+fn checked_api_token_input(app: &Shared, input: &ApiTokenInput) -> Result<Option<Vec<i64>>, Response> {
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 80 {
+        return Err(bad("Token 名称需要 1 到 80 个字符"));
+    }
+    if input.expires_at.is_some_and(|at| at <= Utc::now().timestamp()) {
+        return Err(bad("Token 过期时间必须晚于当前时间"));
+    }
+    if let Some(ids) = &input.node_ids {
+        let known: HashSet<i64> = app.db.nodes().map_err(fail)?.into_iter().map(|n| n.id).collect();
+        if ids.iter().any(|id| !known.contains(id)) {
+            return Err(bad("Token 包含不存在的服务器"));
+        }
+        if ids.is_empty() {
+            return Err(bad("至少选择一台服务器，或留空表示全部服务器"));
+        }
+    }
+    Ok(input.node_ids.clone())
+}
+
+pub async fn api_tokens(_: Admin, State(app): State<Shared>) -> Response {
+    match app.db.api_tokens() {
+        Ok(tokens) => Json(json!({"tokens": tokens})).into_response(),
+        Err(e) => fail(e),
+    }
+}
+
+pub async fn create_api_token(
+    _: Admin,
+    State(app): State<Shared>,
+    Json(input): Json<ApiTokenInput>,
+) -> Response {
+    let node_ids = match checked_api_token_input(&app, &input) {
+        Ok(ids) => ids,
+        Err(response) => return response,
+    };
+    let token = random_token();
+    let name = input.name.trim();
+    match app.db.create_api_token(name, &crate::auth::sha256(&token), input.expires_at, node_ids.as_deref()) {
+        Ok(id) => Json(json!({"id": id, "token": token})).into_response(),
+        Err(e) => fail(e),
+    }
+}
+
+pub async fn update_api_token(
+    _: Admin,
+    State(app): State<Shared>,
+    Path(id): Path<i64>,
+    Json(input): Json<ApiTokenInput>,
+) -> Response {
+    let node_ids = match checked_api_token_input(&app, &input) {
+        Ok(ids) => ids,
+        Err(response) => return response,
+    };
+    match app.db.update_api_token(id, input.name.trim(), input.expires_at, node_ids.as_deref()) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => answer(StatusCode::NOT_FOUND, "API Token 不存在或已撤销"),
+        Err(e) => fail(e),
+    }
+}
+
+pub async fn revoke_api_token(_: Admin, State(app): State<Shared>, Path(id): Path<i64>) -> Response {
+    match app.db.revoke_api_token(id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => answer(StatusCode::NOT_FOUND, "API Token 不存在"),
+        Err(e) => fail(e),
+    }
+}
+
 /// Deleting a row that no longer exists is not an error: two panels open on the
 /// same list both achieve the requested sign-out.
 pub async fn delete_session(_: Admin, State(app): State<Shared>, Path(id): Path<String>) -> Response {
@@ -2178,10 +2358,7 @@ mod tests {
     /// whatever this accepts, the hub will fetch.
     #[test]
     fn only_a_github_repository_url_can_name_a_release_to_download() {
-        assert_eq!(
-            github_repo("https://github.com/spfantop/monitor"),
-            Some(("spfantop", "monitor"))
-        );
+        assert_eq!(github_repo("https://github.com/spfantop/monitor"), Some(("spfantop", "monitor")));
         // A link to the repository, in whatever form the author wrote it.
         assert_eq!(github_repo("https://github.com/a/b.git"), Some(("a", "b")));
         assert_eq!(github_repo("https://github.com/a/b/tree/main"), Some(("a", "b")));

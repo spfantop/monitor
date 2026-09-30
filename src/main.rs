@@ -475,6 +475,9 @@ async fn main() -> Result<()> {
         .route("/api/me", get(api::me))
         .route("/api/nodes", get(api::nodes))
         .route("/api/nodes/{id}/metrics", get(api::metrics))
+        .route("/api/v1/servers", get(api::api_servers))
+        .route("/api/v1/servers/{id}", get(api::api_server))
+        .route("/api/v1/servers/{id}/metrics", get(api::api_server_metrics))
         .route("/api/ws", get(api::live_ws))
         .route("/api/themes/{short}/config", get(api::theme_config))
         // Sign-in.
@@ -495,6 +498,8 @@ async fn main() -> Result<()> {
         .route("/api/ping-tasks/{id}", delete(api::delete_ping_task))
         .route("/api/sessions", get(api::sessions))
         .route("/api/sessions/{id}", delete(api::delete_session))
+        .route("/api/api-tokens", get(api::api_tokens).post(api::create_api_token))
+        .route("/api/api-tokens/{id}", put(api::update_api_token).delete(api::revoke_api_token))
         .route("/api/settings", get(api::settings).put(api::save_settings))
         .route("/api/version", get(api::versions))
         .route("/api/notify/test", post(notify::test))

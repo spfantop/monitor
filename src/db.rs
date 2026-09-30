@@ -147,6 +147,23 @@ CREATE TABLE IF NOT EXISTS session (
   token_hash TEXT    PRIMARY KEY,
   expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS api_token (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  all_nodes INTEGER NOT NULL DEFAULT 1,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS api_token_node (
+  token_id INTEGER NOT NULL REFERENCES api_token(id) ON DELETE CASCADE,
+  node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+  PRIMARY KEY (token_id, node_id)
+);
 "#;
 
 /// Schema revision this build expects, stamped into `PRAGMA user_version`.
@@ -163,7 +180,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet. `an_upgraded_release_matches_a_fresh_database`
 /// holds every migration to these rules, starting from v1.0.0's schema.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -302,6 +319,28 @@ fn migrate_to_10(conn: &Connection) -> Result<()> {
     add_column(conn, "metric", "net_tx_max INTEGER NOT NULL DEFAULT 0")
 }
 
+fn migrate_to_11(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_token (
+           id INTEGER PRIMARY KEY,
+           name TEXT NOT NULL,
+           token_hash TEXT NOT NULL UNIQUE,
+           all_nodes INTEGER NOT NULL DEFAULT 1,
+           expires_at INTEGER,
+           created_at INTEGER NOT NULL,
+           last_used_at INTEGER,
+           revoked_at INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS api_token_node (
+           token_id INTEGER NOT NULL REFERENCES api_token(id) ON DELETE CASCADE,
+           node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+           PRIMARY KEY (token_id, node_id)
+         );",
+    )?;
+    add_column(conn, "api_token", "all_nodes INTEGER NOT NULL DEFAULT 1")?;
+    Ok(())
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -345,13 +384,28 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 10 {
         migrate_to_10(&tx)?;
     }
+    if from < 11 {
+        migrate_to_11(&tx)?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
 }
 
 /// Every table a backup must carry before this build will restore it.
-const TABLES: [&str; 8] =
+const TABLES: [&str; 10] = [
+    "setting",
+    "node",
+    "traffic",
+    "metric",
+    "ping_task",
+    "ping_node",
+    "ping_record",
+    "session",
+    "api_token",
+    "api_token_node",
+];
+const REQUIRED_TABLES: [&str; 8] =
     ["setting", "node", "traffic", "metric", "ping_task", "ping_node", "ping_record", "session"];
 
 /// One node's stored configuration and last known facts.
@@ -1727,7 +1781,7 @@ impl Db {
         if plotted > 0 {
             refuse!("文件里有视图或触发器，不是 hub 导出的备份");
         }
-        for table in TABLES {
+        for table in REQUIRED_TABLES {
             let found: i64 = candidate.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
                 [table],
@@ -1866,6 +1920,133 @@ impl Db {
         self.conn().execute("DELETE FROM session WHERE expires_at <= ?1", [Utc::now().timestamp()])?;
         Ok(())
     }
+
+    // ---- API tokens ----
+
+    pub fn create_api_token(
+        &self,
+        name: &str,
+        token_hash: &str,
+        expires_at: Option<i64>,
+        node_ids: Option<&[i64]>,
+    ) -> Result<i64> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO api_token (name, token_hash, all_nodes, expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![name, token_hash, node_ids.is_none(), expires_at, Utc::now().timestamp()],
+        )?;
+        let id = tx.last_insert_rowid();
+        if let Some(nodes) = node_ids {
+            for node_id in nodes {
+                tx.execute(
+                    "INSERT INTO api_token_node (token_id, node_id) VALUES (?1, ?2)",
+                    params![id, node_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn api_tokens(&self) -> Result<Vec<ApiToken>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, all_nodes, expires_at, created_at, last_used_at, revoked_at
+             FROM api_token ORDER BY id DESC",
+        )?;
+        let mut out = Vec::new();
+        for row in stmt.query_map([], |r| {
+            Ok(ApiToken {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                expires_at: r.get(3)?,
+                created_at: r.get(4)?,
+                last_used_at: r.get(5)?,
+                revoked_at: r.get(6)?,
+                node_ids: Vec::new(),
+                all_nodes: r.get(2)?,
+            })
+        })? {
+            let mut token = row?;
+            let mut nodes =
+                conn.prepare("SELECT node_id FROM api_token_node WHERE token_id=?1 ORDER BY node_id")?;
+            token.node_ids = nodes.query_map([token.id], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            out.push(token);
+        }
+        Ok(out)
+    }
+
+    pub fn revoke_api_token(&self, id: i64) -> Result<bool> {
+        Ok(self.conn().execute(
+            "UPDATE api_token SET revoked_at=COALESCE(revoked_at, ?2) WHERE id=?1",
+            params![id, Utc::now().timestamp()],
+        )? > 0)
+    }
+
+    pub fn update_api_token(
+        &self,
+        id: i64,
+        name: &str,
+        expires_at: Option<i64>,
+        node_ids: Option<&[i64]>,
+    ) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        if tx.execute(
+            "UPDATE api_token SET name=?2, all_nodes=?3, expires_at=?4 WHERE id=?1 AND revoked_at IS NULL",
+            params![id, name, node_ids.is_none(), expires_at],
+        )? == 0
+        {
+            return Ok(false);
+        }
+        if let Some(nodes) = node_ids {
+            tx.execute("DELETE FROM api_token_node WHERE token_id=?1", [id])?;
+            for node_id in nodes {
+                tx.execute(
+                    "INSERT INTO api_token_node (token_id, node_id) VALUES (?1, ?2)",
+                    params![id, node_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Returns the token's node scope. An empty scope means all nodes.
+    pub fn use_api_token(&self, token_hash: &str) -> Result<Option<(i64, Option<Vec<i64>>)>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let row = tx
+            .query_row(
+                "SELECT id, all_nodes FROM api_token
+                 WHERE token_hash=?1 AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?2)",
+                params![token_hash, Utc::now().timestamp()],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+            )
+            .optional()?;
+        let Some((id, all_nodes)) = row else { return Ok(None) };
+        tx.execute("UPDATE api_token SET last_used_at=?2 WHERE id=?1", params![id, Utc::now().timestamp()])?;
+        let mut stmt = tx.prepare("SELECT node_id FROM api_token_node WHERE token_id=?1 ORDER BY node_id")?;
+        let nodes = stmt.query_map([id], |r| r.get(0))?.collect::<Result<Vec<i64>, _>>()?;
+        drop(stmt);
+        tx.commit()?;
+        Ok(Some((id, (!all_nodes).then_some(nodes))))
+    }
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ApiToken {
+    pub id: i64,
+    pub name: String,
+    pub expires_at: Option<i64>,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub node_ids: Vec<i64>,
+    pub all_nodes: bool,
 }
 
 /// Turns one finished bucket into a row per probe, stamped with the bucket's
@@ -2049,6 +2230,24 @@ mod tests {
         assert_eq!(conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap(), "wal");
         drop(conn);
         let _ = std::fs::remove_file(&copy);
+    }
+
+    #[test]
+    fn api_tokens_keep_scope_expiry_and_revocation_separate() {
+        let scratch = Scratch::new();
+        let db = Db::open(&scratch.0).unwrap();
+        let first = db.create_node(&Node { name: "one".into(), ..Default::default() }, "node-one").unwrap();
+        let second = db.create_node(&Node { name: "two".into(), ..Default::default() }, "node-two").unwrap();
+        let all = db.create_api_token("all", "hash-all", None, None).unwrap();
+        let scoped = db.create_api_token("scoped", "hash-scoped", None, Some(&[first])).unwrap();
+        assert_eq!(db.use_api_token("hash-all").unwrap().unwrap().1, None);
+        assert_eq!(db.use_api_token("hash-scoped").unwrap().unwrap().1, Some(vec![first]));
+        assert!(db
+            .update_api_token(scoped, "scoped", Some(Utc::now().timestamp() - 1), Some(&[second]))
+            .is_ok());
+        assert!(db.use_api_token("hash-scoped").unwrap().is_none(), "expired token must be rejected");
+        assert!(db.revoke_api_token(all).unwrap());
+        assert!(db.use_api_token("hash-all").unwrap().is_none(), "revoked token must be rejected");
     }
 
     /// The upload behind restore is an externally supplied file. Each case here
