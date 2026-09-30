@@ -20,3 +20,21 @@
 ```
 agent (Linux)  ──WebSocket / JSON-RPC 2.0──▶  hub (axum + SQLite)  ──▶  后台 + 状态页
 ```
+
+## 只读 API Token
+
+管理员可在后台「安全」中创建只读 API Token，并将它限制到全部或指定服务器。完整 Token 只在创建时显示一次；请求必须使用请求头传递：
+
+```http
+Authorization: Bearer <api-token>
+```
+
+接口：
+
+```text
+GET /api/v1/servers
+GET /api/v1/servers/:id
+GET /api/v1/servers/:id/metrics
+```
+
+Token 只允许读取服务器数据，不能代替后台登录，也不能读取节点 Token、管理员信息或后台配置。不要把 Token 放在 URL 参数中。
