@@ -2,6 +2,8 @@
 
 文档：[monitor-document.pages.dev](https://monitor-document.pages.dev)，安装、配置、反向代理与主题开发都在这里。
 
+主题站：[monitor-themes.pages.dev](https://monitor-themes.pages.dev)，在线预览各个公开页主题，复制地址即可在面板安装。
+
 ## 特性
 
 - 实时监控：秒级实时数据展示
@@ -16,6 +18,7 @@
 | [monitor](https://github.com/spfantop/monitor) | hub：后台、API、公开页宿主 |
 | [agent](https://github.com/spfantop/agent) | Linux agent |
 | [monitor-theme-default](https://github.com/spfantop/monitor-theme-default) | 内置默认主题 |
+| [themes](https://github.com/monitor-probe/themes) | 主题站：收录第三方主题，提供在线预览 |
 
 ```
 agent (Linux)  ──WebSocket / JSON-RPC 2.0──▶  hub (axum + SQLite)  ──▶  后台 + 状态页
