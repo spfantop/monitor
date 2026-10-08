@@ -18,7 +18,7 @@
 1. 先提交、发布改版默认主题 1.4.0。
 2. 将工作区 `artifacts/theme-v1.4.0/theme.tar.gz` 和 `theme.tar.gz.sha256` 上传到 spfantop/monitor-theme-default 的 `v1.4.0` Release。当前 Hub 的 `web-theme.pin` 对应的 SHA-256 为：
 
-   `e70f7b10ac455db234ea774d3a8b511f9fbbc269f9ab55183276b0d6ec116ad9`
+   `966733c6b370b9a7b8c0d1e191f7dce961298b71de3f8e30c46b594ebde8f6c7`
 
    如由主题 CI 重新打包，压缩包字节和校验值可能不同，必须先把 `web-theme.pin` 改为实际发布产物的校验值，再构建 Hub；不得禁用校验。
 3. 再提交、构建及发布 Hub。主题尚未发布时，全新环境构建无法下载该固定版本；本地验证使用同一压缩包内容和 pin 填充 `target/theme`。
